@@ -66,6 +66,19 @@ function fmtShortDay(iso) {
   const [, m, d] = iso.split("-").map(Number);
   return `${d} ${MONTHS_SHORT[m - 1]}`;
 }
+function fmtDayShort(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return `${d} ${MONTHS_SHORT[m - 1]}, ${WEEKDAYS[dt.getUTCDay()]}`;
+}
+function dayShiftIso(days) {
+  return new Intl.DateTimeFormat("sv-SE", {
+    timeZone: TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(Date.now() + days * 864e5));
+}
 const fmtTime = (iso) => iso.slice(11, 16);
 const fmtRange = (e) => `${fmtTime(e.start)}–${fmtTime(e.end)}`;
 
@@ -134,7 +147,8 @@ function statsOf(events) {
 }
 
 const pct = (n, d) => (d ? Math.round((n * 1000) / d) / 10 : null);
-const fmtPct = (p) => (p === null ? "—" : (Number.isInteger(p) ? p : p.toFixed(1)) + "%");
+const fmtPct = (p) =>
+  p === null ? "—" : (Number.isInteger(p) ? p : p.toFixed(1).replace(".", ",")) + "%";
 
 function canSkip(s) {
   const T = Number(state.settings.target) || 0;
@@ -151,9 +165,16 @@ function cardHtml(e, opts = {}) {
   const today = mskToday();
   const day = e.start.slice(0, 10);
 
+  const nowIso = mskNow();
+  const live = !cancelled && e.start.slice(0, 16) <= nowIso && e.end.slice(0, 16) > nowIso;
+
   let badge = "";
-  if (cancelled) badge = `<span class="badge cancel">Отменено</span>`;
-  else if (TYPE[e.type]) badge = `<span class="badge ${TYPE_CLASS[e.type] || ""}">${TYPE[e.type]}</span>`;
+  if (cancelled) {
+    badge = `<span class="badge cancel">Отменено</span>`;
+  } else {
+    if (live) badge += `<span class="badge now">Сейчас</span>`;
+    if (TYPE[e.type]) badge += `<span class="badge ${TYPE_CLASS[e.type] || ""}">${TYPE[e.type]}</span>`;
+  }
 
   const meta = [];
   if (e.room) meta.push(esc(e.room));
@@ -173,10 +194,10 @@ function cardHtml(e, opts = {}) {
       <button data-act="reset" class="reset"${r ? "" : " disabled"} title="Сбросить">↺</button>
     </div>`;
   } else {
-    seg = `<div class="future">Ещё не было</div>`;
+    seg = `<div class="future">Запланировано</div>`;
   }
 
-  return `<article class="card${cancelled ? " cancelled" : ""}" style="--c:hsl(${hue(e.subject_id || e.subject || "x")} 55% 52%)">
+  return `<article class="card${cancelled ? " cancelled" : ""}${live ? " live" : ""}" style="--c:hsl(${hue(e.subject_id || e.subject || "x")} 62% 50%)">
     <div class="card-top">
       <span class="time">${fmtRange(e)}</span>
       ${day !== today ? `<span>${fmtShortDay(day)}</span>` : ""}
@@ -243,6 +264,35 @@ function subjectGroups() {
     .sort((a, b) => a.name.localeCompare(b.name, "ru"));
 }
 
+function ringHtml(value, target) {
+  const R = 50;
+  const C = 2 * Math.PI * R;
+  const Rt = 56;
+  const Ct = 2 * Math.PI * Rt;
+  const v = value === null ? 0 : Math.max(0, Math.min(100, value));
+  const t = Math.max(0, Math.min(100, Number(target) || 0));
+  const color =
+    value === null ? "var(--muted)" : t > 0 && v < t ? "var(--red)" : "var(--green)";
+  const tick =
+    t > 0
+      ? `<circle class="ring-target" cx="60" cy="60" r="${Rt}" style="stroke-dasharray:2 ${(Ct - 2).toFixed(1)};stroke-dashoffset:${((-Ct * t) / 100).toFixed(1)}"/>`
+      : "";
+  const num =
+    value === null
+      ? "—"
+      : Number.isInteger(value)
+        ? String(value)
+        : value.toFixed(1).replace(".", ",");
+  return `<div class="ring-wrap">
+    <svg class="ring" viewBox="0 0 120 120" aria-hidden="true">
+      <circle class="ring-track" cx="60" cy="60" r="${R}"/>
+      <circle class="ring-value" cx="60" cy="60" r="${R}" style="stroke:${color};stroke-dasharray:${C.toFixed(1)};stroke-dashoffset:${(C * (1 - v / 100)).toFixed(1)}"/>
+      ${tick}
+    </svg>
+    <div class="ring-label"><b>${num}${value === null ? "" : "<i>%</i>"}</b><span>с уваж.</span></div>
+  </div>`;
+}
+
 function renderSubjects() {
   const body = $("#subjectsBody");
   if (!state.schedule) {
@@ -252,47 +302,94 @@ function renderSubjects() {
   const all = statsOf(state.schedule.events || []);
   const len = pct(all.present, all.present + all.absent);
   const strict = pct(all.present, all.present + all.absent + all.excused);
+  const t = Number(state.settings.target) || 0;
   const skip = canSkip(all);
   const marked = all.present + all.absent + all.excused;
 
-  const summary = marked
-    ? `${all.present} из ${marked} ${plural(marked, "занятия", "занятий", "занятий")}
-       · строго ${fmtPct(strict)}
-       ${all.unmarked ? ` · <b>${all.unmarked} без отметки</b>` : ""}`
-    : `Пока нет отметок${all.unmarked ? ` · прошло ${all.unmarked}` : ""}`;
+  const sub = marked
+    ? `${all.present} из ${marked} ${plural(marked, "занятия", "занятий", "занятий")} · строго <b>${fmtPct(strict)}</b>`
+    : all.unmarked
+      ? `пока нет отметок · прошло ${all.unmarked}`
+      : "пока нет прошедших занятий";
+
+  const pills = [];
+  if (skip !== null) {
+    pills.push(
+      skip > 0
+        ? `<span class="pill">можно пропустить ещё <b>${skip}</b></span>`
+        : `<span class="pill warn">запаса нет — пропускать нельзя</span>`
+    );
+  }
+  if (all.unmarked) pills.push(`<span class="pill neutral">${all.unmarked} без отметки</span>`);
 
   let html = `<div class="overall">
-    <div class="big">${fmtPct(len).replace("%", "")}<small>${len === null ? "" : "%"}</small></div>
-    <div class="sub">${summary}</div>
-    ${skip !== null ? `<div class="sub">До ${state.settings.target}% можно пропустить ещё <b>${skip}</b> ${plural(skip, "пару", "пары", "пар")}</div>` : ""}
+    <div class="overall-main">
+      ${ringHtml(len, t)}
+      <div class="overall-body">
+        <div class="overall-title">Посещаемость${t ? ` <span class="goal">цель ${t}%</span>` : ""}</div>
+        <div class="overall-sub">${sub}</div>
+        ${pills.length ? `<div class="overall-pills">${pills.join("")}</div>` : ""}
+      </div>
+    </div>
   </div>`;
 
-  for (const g of subjectGroups()) {
-    const s = g.s;
-    const p = pct(s.present, s.present + s.absent);
-    const st = pct(s.present, s.present + s.absent + s.excused);
-    const total = s.present + s.absent + s.excused + s.unmarked;
-    const marked = s.present + s.absent + s.excused;
-    const sk = canSkip(s);
-    const color = `hsl(${hue(g.id)} 55% 52%)`;
-    const foot = marked
-      ? `<span><b>${s.present}</b> из <b>${marked}</b>${s.excused ? ` · строго ${fmtPct(st)}` : ""}${s.unmarked ? ` · ${s.unmarked} без отметки` : ""}</span>
-         <span>${sk === null ? "" : `можно пропустить: <b>${sk}</b>`}</span>`
-      : `<span>нет отметок · ${total} ${plural(total, "пара", "пары", "пар")}</span><span></span>`;
-    html += `<div class="subj" style="--c:${color}">
-      <div class="subj-head">
-        <div class="subj-name">${esc(g.name)}</div>
-        <div class="subj-pct">${fmtPct(p)}</div>
-      </div>
-      <div class="bar"><i style="width:${p === null ? 0 : Math.min(100, p)}%"></i></div>
-      <div class="subj-foot">${foot}</div>
-    </div>`;
+  const groups = subjectGroups();
+  if (!groups.length) {
+    body.innerHTML =
+      html + `<div class="empty"><span class="emoji">📚</span><p>Пока нет занятий</p></div>`;
+    return;
   }
 
-  body.innerHTML = html;
+  const cards = groups
+    .map((g) => {
+      const s = g.s;
+      const p = pct(s.present, s.present + s.absent);
+      const st = pct(s.present, s.present + s.absent + s.excused);
+      const total = s.present + s.absent + s.excused + s.unmarked;
+      const done = s.present + s.absent + s.excused;
+      const sk = canSkip(s);
+      const color = `hsl(${hue(g.id)} 62% 48%)`;
+      const good = p !== null && (t <= 0 || p >= t);
+      const pctColor = p === null ? "var(--muted)" : good ? "var(--green)" : "var(--red)";
+      const w = p === null ? 0 : Math.max(3, Math.min(100, p));
+      const footL = done
+        ? `<b>${s.present}</b> из <b>${done}</b>${s.excused ? ` · строго ${fmtPct(st)}` : ""}${s.unmarked ? ` · ${s.unmarked} без отм.` : ""}`
+        : `нет отметок · ${total} ${plural(total, "пара", "пары", "пар")}`;
+      const footR =
+        sk === null
+          ? ""
+          : sk > 0
+            ? `запас <b>${sk}</b>`
+            : `<span class="${p !== null && t > 0 && p < t ? "neg" : ""}">запас 0</span>`;
+      return `<div class="subj" style="--c:${color}">
+      <div class="subj-head">
+        <div class="subj-name">${esc(g.name)}</div>
+        <div class="subj-pct" style="color:${pctColor}">${fmtPct(p)}</div>
+      </div>
+      <div class="bar"><i style="width:${w}%;background:${pctColor}"></i>${t ? `<span class="tick" style="left:${Math.min(100, t)}%"></span>` : ""}</div>
+      <div class="subj-foot"><span>${footL}</span><span>${footR}</span></div>
+    </div>`;
+    })
+    .join("");
+
+  body.innerHTML = html + `<div class="subj-grid">${cards}</div>`;
 }
 
 /* ---------------- render: all ---------------- */
+
+const CHIP_LABELS = { all: "Все", unmarked: "Без отметки", missed: "Пропуски" };
+
+function updateChips(base) {
+  const counts = {
+    all: base.length,
+    unmarked: base.filter((e) => !rec(e.id)).length,
+    missed: base.filter((e) => rec(e.id) === "absent" || rec(e.id) === "excused").length,
+  };
+  $$("#filters .chip").forEach((c) => {
+    const n = counts[c.dataset.filter] || 0;
+    c.textContent = CHIP_LABELS[c.dataset.filter] + (n ? ` ${n}` : "");
+  });
+}
 
 function renderAll() {
   const body = $("#allBody");
@@ -301,15 +398,22 @@ function renderAll() {
     return;
   }
   const today = mskToday();
-  let list = (state.schedule.events || []).filter(
+  const yesterday = dayShiftIso(-1);
+  const base = (state.schedule.events || []).filter(
     (e) => e.status !== "CANCELLED" && e.start.slice(0, 10) <= today && isPast(e)
   );
+  updateChips(base);
 
-  if (state.filter === "unmarked") list = list.filter((e) => !rec(e.id));
-  if (state.filter === "missed") list = list.filter((e) => rec(e.id) === "absent" || rec(e.id) === "excused");
+  let list = base;
+  if (state.filter === "unmarked") list = base.filter((e) => !rec(e.id));
+  if (state.filter === "missed")
+    list = base.filter((e) => rec(e.id) === "absent" || rec(e.id) === "excused");
 
   if (!list.length) {
-    body.innerHTML = `<div class="empty"><span class="emoji">🔍</span><p>Ничего не найдено</p></div>`;
+    const none = state.filter === "unmarked";
+    body.innerHTML = `<div class="empty"><span class="emoji">${none ? "✅" : "🔍"}</span><p>${
+      none ? "Всё отмечено — так держать" : "Ничего не найдено"
+    }</p></div>`;
     return;
   }
 
@@ -331,20 +435,21 @@ function renderAll() {
       if (absent) parts.push(`${absent} ✕`);
       if (excused) parts.push(`${excused} у`);
       const unmarked = evs.filter((e) => !rec(e.id)).length;
+      const rel = d === today ? "Сегодня" : d === yesterday ? "Вчера" : fmtDay(d);
       return `<div class="day-head">
-          <h2>${fmtDay(d)}</h2>
+          <h2>${rel}</h2>
           <div class="day-right">
             <span>${parts.join(" · ")}</span>
             ${unmarked ? `<button class="mini" data-day="${d}">Все были</button>` : ""}
           </div>
         </div>
-        <div class="cards" style="margin-bottom:16px">${evs.map((e) => cardHtml(e)).join("")}</div>`;
+        <div class="cards" style="margin-bottom:18px">${evs.map((e) => cardHtml(e)).join("")}</div>`;
     })
     .join("");
 
   const bulk =
     state.filter === "unmarked" && list.length
-      ? `<div class="bulk"><button class="btn ghost" id="bulkMark">Отметить все ${list.length} как «был»</button></div>`
+      ? `<div class="bulk"><button class="btn" id="bulkMark">Отметить все ${list.length} как «был»</button></div>`
       : "";
   body.innerHTML = bulk + html;
 }
@@ -360,10 +465,8 @@ function render() {
 
 function updateHeader() {
   const today = mskToday();
-  let extra = "";
   let unmarked = 0;
   if (state.schedule) {
-    const today = mskToday();
     unmarked = (state.schedule.events || []).filter(
       (e) =>
         e.status !== "CANCELLED" &&
@@ -371,11 +474,22 @@ function updateHeader() {
         isPast(e) &&
         !rec(e.id)
     ).length;
-    if (unmarked) extra = ` · ${unmarked} без отметки`;
   }
+
+  const date = $("#todayDate");
+  if (date) date.textContent = fmtDayShort(today);
+
   const label = $("#todayLabel");
-  label.textContent = fmtDay(today) + extra;
-  label.classList.toggle("clickable", unmarked > 0);
+  if (label) {
+    label.textContent = `${unmarked} без отметки`;
+    label.hidden = unmarked === 0;
+  }
+
+  const badge = $("#allBadge");
+  if (badge) {
+    badge.hidden = unmarked === 0;
+    badge.textContent = unmarked > 99 ? "99+" : String(unmarked);
+  }
 }
 
 /* ---------------- sync: gist ---------------- */
@@ -651,6 +765,7 @@ function toast(msg) {
 function switchTab(name) {
   $$(".tabbtn").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   $$(".tab").forEach((s) => s.classList.toggle("active", s.id === "tab-" + name));
+  window.scrollTo(0, 0);
   if (name === "more") setSched(schedSummary());
 }
 
@@ -718,7 +833,6 @@ document.addEventListener("click", (ev) => {
 $$(".tabbtn").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 
 $("#todayLabel").addEventListener("click", () => {
-  if (!$("#todayLabel").classList.contains("clickable")) return;
   switchTab("all");
   state.filter = "unmarked";
   $$(".chip").forEach((c) => c.classList.toggle("active", c.dataset.filter === "unmarked"));
@@ -739,6 +853,10 @@ window.addEventListener("online", () => {
 
 async function init() {
   initSettings();
+
+  const want = new URLSearchParams(location.search).get("tab");
+  if (want && ["today", "subjects", "all", "more"].includes(want)) switchTab(want);
+
   render();
   await pullSchedule(false);
   await pullAttendance();
